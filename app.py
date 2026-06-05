@@ -51,15 +51,23 @@ def display_source_tabs(context):
 with st.sidebar:
     st.title("⚙️ Document Settings")
     
-    # 10 LPA+ FEATURE: Bring Your Own Key (BYOK) Input Box
+    # Check if a default system key is configured in your env/secrets
+    system_key = os.getenv("GOOGLE_API_KEY")
+    system_key_exists = system_key is not None and system_key.strip() != ""
+    
+    # Dynamically change label: Optional locally, Required for public users
+    key_label = "Gemini API Key (Optional)" if system_key_exists else "Gemini API Key (Required)"
+    placeholder_text = "Uses local system key by default..." if system_key_exists else "Required to run queries..."
+    
+    # Security: Bring Your Own Key (BYOK) Input Box
     user_key = st.text_input(
-        "Gemini API Key (Optional)", 
+        key_label, 
         type="password", 
-        placeholder="Pasted keys protect my daily quota...",
-        help="Get a free key from Google AI Studio. If left blank, it will use the default system key."
+        placeholder=placeholder_text,
+        help="Get a free key from Google AI Studio. Since this is a public demo, providing your own key is required." if not system_key_exists else "If left blank, it will use the default system key."
     )
     
-    # Determine which key to use (User-entered key takes priority over environment key)
+    # Determine which key to use (User key takes priority over default key)
     active_key = user_key if user_key else os.getenv("GOOGLE_API_KEY")
     
     st.write("---")
@@ -72,7 +80,6 @@ with st.sidebar:
     
     # CASE A: A file is actively uploaded
     if uploaded_file is not None:
-        # Check if we have an active key available
         if not active_key:
             st.error("🔑 Please enter a Gemini API Key or configure the system key in Secrets!")
         else:
@@ -84,7 +91,7 @@ with st.sidebar:
                 
                 with st.status("Reading and indexing document...", expanded=True) as status:
                     try:
-                        # Check if the vector database already exists on disk
+                        # Performance: Check if the vector database already exists on disk (Caching)
                         if os.path.exists(db_dir):
                             status.write("⚡ Found existing database on disk. Loading instantly...")
                             embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-2", google_api_key=active_key)
@@ -113,7 +120,7 @@ with st.sidebar:
                         st.error(f"Error: {e}")
                         st.session_state.vector_db = None
                         st.session_state.current_file = None
-                        
+                    
     # CASE B: No file is uploaded
     else:
         if st.session_state.current_file is not None:

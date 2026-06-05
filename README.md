@@ -1,8 +1,8 @@
-# The Ultimate Beginner's Guide: Setting Up `DeepDoc` from Scratch
+# 🧠 DeepDoc: Advanced Multimodal PDF RAG Analyzer
 
-Welcome to your brand-new AI development workspace! This document summarizes everything we accomplished to get your **Advanced PDF RAG (Retrieval-Augmented Generation) Search Assistant** completely configured, optimized, and ready to deploy.
+DeepDoc is an interview-grade, production-ready **Retrieval-Augmented Generation (RAG)** document search engine. It allows users to upload complex documents (such as academic research papers, corporate PDFs, or certificates) and ask targeted, context-grounded questions. 
 
-Instead of following simple tutorial guidelines (which crash on large files and expose private keys), we built this project using **production-grade engineering patterns** (caching, rate-limiting, and multi-user isolation). This README is designed specifically to help you understand exactly **what** was done, **why** it was done, and **how** to explain it during interviews.
+Unlike standard RAG tutorials, DeepDoc is architected to handle **complex layouts, tables, and images**, incorporating enterprise patterns like **database caching, rate-limit boundaries, and multi-user API key isolation**.
 
 ---
 
@@ -20,13 +20,13 @@ Imagine you have a **100-page book** and you want to know: *"What does Page 47 s
 
 ## 🚀 Comparison: Why We Did Things This Way
 
-| Setup Phase | Traditional Approach (Basic RAG) | Our Optimized Approach (DeepDoc) | Why We Did It (10 LPA+ Rationale) |
+| Setup Phase | Traditional Approach (Basic RAG) | Our Optimized Approach (DeepDoc) | Why We Did It (Engineering Rationale) |
 | :--- | :--- | :--- | :--- |
-| **Orchestration** | Use legacy LangChain chains (`create_retrieval_chain`). | Used modern **LCEL (LangChain Expression Language)** using the pipe (`\|`) operator. | **Interview Winner.** LCEL is the modern 2026 standard. It makes the data flow explicit and supports clean streaming and async execution. |
+| **Orchestration** | Use legacy LangChain chains (`create_retrieval_chain`). | Used modern **LCEL (LangChain Expression Language)** using the pipe (`\|`) operator. | **Production Standard.** LCEL is the modern standard. It makes the data flow explicit and supports clean streaming and async execution. |
 | **Embedding Model** | Use default `gemini-embedding-001`. | Switched dynamically to **`gemini-embedding-2`**. | **Bypasses API Blocks.** Since the old model hit daily limits during large PDF uploads, switching models gave us a fresh daily quota instantly. |
 | **Document Load** | Re-run text extraction & embeddings on every upload/refresh. | Implemented **Disk-Based Caching** (`os.path.exists`). | **Saves Quota.** It loads existing database folders in **0.1 seconds using 0 API calls**, making reloads instant and free. |
 | **PDF Extraction** | Use simple text loaders (`PyPDFLoader`). | Combined **`pdfplumber`** (for markdown tables) and **`pymupdf`** (for visual images). | **Layout Awareness.** Basic loaders turn tables into a jumbled mess and ignore charts. This method preserves structured tables and diagrams. |
-| **Key Security** | Hardcode the API key in code or Streamlit Secrets. | Implemented the **BYOK (Bring Your Own Key)** password-masked sidebar input. | **Protects Your Wallet.** Deployed users must enter their own key, preventing them from exhausting your personal daily quota. |
+| **Key Security** | Hardcode the API key in code or Streamlit Secrets. | Implemented the **BYOK (Bring Your Own Key)** password-masked sidebar input. | **Protects API Limits.** Deployed users must enter their own key, preventing them from exhausting your personal daily quota. |
 
 ---
 
