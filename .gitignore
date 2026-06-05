@@ -1,0 +1,9 @@
+# Ignore local environment variables (Security!)
+.env
+
+# Ignore python virtual environment
+.venv/
+__pycache__/
+
+# Ignore local vector databases
+chroma_db*/
