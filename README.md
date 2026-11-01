@@ -1,8 +1,8 @@
-# 🧠 DeepDoc: Advanced Multimodal PDF RAG Analyzer
+# 🧠 DeepDoc: Advanced Multimodal PDF & ZIP RAG Analyzer
 
-DeepDoc is an interview-grade, production-ready **Retrieval-Augmented Generation (RAG)** document search engine. It allows users to upload complex documents (such as academic research papers, corporate PDFs, or certificates) and ask targeted, context-grounded questions. 
+DeepDoc is an interview-grade, production-ready **Retrieval-Augmented Generation (RAG)** document search engine. It allows users to upload complex documents (such as academic research papers, corporate PDFs, or ZIP archives containing multi-file documentation) and ask targeted, context-grounded questions. 
 
-Unlike standard RAG tutorials, DeepDoc is architected to handle **complex layouts, tables, and images**, incorporating enterprise patterns like **database caching, rate-limit boundaries, and multi-user API key isolation**.
+Unlike standard RAG tutorials, DeepDoc is architected to handle **complex layouts, tables, and images**, unpack **ZIP archives** recursively, and run ultra-fast inference with **Groq**, incorporating enterprise patterns like **database caching, zero-API-key local embeddings, and multi-user API key isolation**.
 
 ---
 
@@ -76,8 +76,13 @@ Here is the exact definition, engineering rationale, and location for every tool
 
 ### 9. `python-dotenv` (v1.0.1)
 * **Definition:** A utility library that reads key-value pairs from a hidden `.env` file and loads them into your operating system's environment variables.
-* **Why we used it:** Securely loads the `GOOGLE_API_KEY` into Python's memory without hardcoding the key inside the code.
+* **Why we used it:** Securely loads the `GOOGLE_API_KEY` and `GROQ_API_KEY` into Python's memory without hardcoding secrets inside the code.
 * **Where it is used:** Called at the very top of `app.py` and `rag_pipeline.py` using `load_dotenv()`.
+
+### 10. Groq & `langchain-groq`
+* **Definition:** Groq's high-speed LPU (Language Processing Unit) inference engine and its official LangChain integration.
+* **Why we used it:** Delivers near-instant, high-throughput text generation for models like `llama-3.3-70b-versatile` and `llama-3.1-8b-instant`, eliminating generation latency during document Q&A.
+* **Where it is used:** Configured in `app.py` (sidebar model selection) and invoked in `rag_pipeline.py` inside `query_rag_system`.
 
 ---
 
@@ -109,4 +114,5 @@ graph TD
     J --> K[Query Embedded with gemini-embedding-2]
     K --> L[Chroma Similarity Search: Fetch k=3 chunks]
     L --> M[LCEL Generation Chain]
-    M --> N[Gemini 2.5 Flash: Answer with Page Citations]
+    M --> N[Groq LPU (LLaMA 3.3 70B) / Gemini Fallback: Answer with Page Citations]
+```

@@ -1,6 +1,8 @@
 import os
 import io
 import time  # For rate limit sleep
+import zipfile
+import tempfile
 import fitz  # PyMuPDF for image extraction
 import pdfplumber  # For table extraction
 from dotenv import load_dotenv
@@ -10,11 +12,13 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # LangChain Chroma and Google Embeddings libraries
+from langchain_core.embeddings import Embeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma
 
 # LCEL Imports
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -23,6 +27,31 @@ import google.generativeai as genai
 
 # Load our API key from the .env file
 load_dotenv()
+
+class LocalMiniLMEmbeddings(Embeddings):
+    """
+    Zero-key, 100% local embedding model powered by Chroma's built-in ONNX all-MiniLM-L6-v2.
+    Requires no API keys, runs on CPU, and has zero rate limits.
+    """
+    def __init__(self):
+        from chromadb.utils import embedding_functions
+        self.ef = embedding_functions.DefaultEmbeddingFunction()
+
+    def embed_documents(self, texts):
+        return self.ef(texts)
+
+    def embed_query(self, text):
+        return self.ef([text])[0]
+
+def get_embedding_model(api_key: str = None):
+    """
+    Returns GoogleGenerativeAIEmbeddings if a Gemini key is explicitly provided,
+    otherwise returns free local embeddings with zero API key requirement.
+    """
+    if api_key and api_key.strip():
+        return GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-2", google_api_key=api_key.strip())
+    return LocalMiniLMEmbeddings()
+
 
 def convert_table_to_markdown(table):
     if not table or not table[0]:
@@ -44,12 +73,13 @@ def describe_image_with_gemini(image_bytes: bytes, api_key: str) -> str:
     """
     return "[Image description skipped to preserve daily API quota]"
 
-def extract_advanced_pdf(file_path: str, api_key: str):
+def extract_advanced_pdf(file_path: str, api_key: str = None, display_source_name: str = None):
     """
     Reads a PDF, extracts text, tables, and describes images.
     """
     documents = []
     doc_fitz = fitz.open(file_path)
+    source_label = display_source_name if display_source_name else os.path.basename(file_path)
     
     with pdfplumber.open(file_path) as pdf:
         total_pages = len(pdf.pages)
@@ -96,7 +126,7 @@ def extract_advanced_pdf(file_path: str, api_key: str):
                 documents.append(
                     Document(
                         page_content=page_text,
-                        metadata={"source": file_path, "page": page_idx + 1}
+                        metadata={"source": source_label, "page": page_idx + 1}
                     )
                 )
             except Exception as page_err:
@@ -105,25 +135,110 @@ def extract_advanced_pdf(file_path: str, api_key: str):
     doc_fitz.close()
     return documents
 
-def get_document_chunks(file_path: str, api_key: str):
-    documents = extract_advanced_pdf(file_path, api_key)
-    print("\nSplitting documents into chunks...")
+def extract_text_file(file_path: str, display_name: str):
+    """
+    Reads plain text, markdown, code, and structured data files.
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+        return []
+        
+    if not text.strip():
+        return []
+        
+    return [
+        Document(
+            page_content=text,
+            metadata={"source": display_name, "page": 1}
+        )
+    ]
+
+def extract_zip_archive(zip_path: str, api_key: str = None, original_zip_name: str = "archive.zip"):
+    """
+    Unpacks a ZIP archive and extracts text from all enclosed PDFs, Markdown,
+    text, CSV, JSON, and code files.
+    """
+    documents = []
+    supported_text_exts = {
+        ".txt", ".md", ".markdown", ".csv", ".json", ".py", ".html", 
+        ".xml", ".rst", ".yaml", ".yml", ".log", ".sql"
+    }
+    
+    with tempfile.TemporaryDirectory() as extract_dir:
+        print(f"Unpacking ZIP: {original_zip_name}...")
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                zip_ref.extractall(extract_dir)
+        except Exception as e:
+            raise ValueError(f"Failed to extract ZIP archive: {e}")
+            
+        for root, dirs, files in os.walk(extract_dir):
+            # Ignore OS metadata and hidden directories
+            dirs[:] = [d for d in dirs if not d.startswith("__") and not d.startswith(".")]
+            
+            for file_name in files:
+                if file_name.startswith(".") or file_name.startswith("__"):
+                    continue
+                    
+                full_path = os.path.join(root, file_name)
+                rel_path = os.path.relpath(full_path, extract_dir).replace("\\", "/")
+                display_name = f"{original_zip_name} / {rel_path}"
+                _, ext = os.path.splitext(file_name.lower())
+                
+                if ext == ".pdf":
+                    print(f" -> Found PDF in ZIP: {rel_path}")
+                    pdf_docs = extract_advanced_pdf(full_path, api_key=api_key, display_source_name=display_name)
+                    documents.extend(pdf_docs)
+                elif ext in supported_text_exts:
+                    print(f" -> Found text/code file in ZIP: {rel_path}")
+                    txt_docs = extract_text_file(full_path, display_name)
+                    documents.extend(txt_docs)
+                else:
+                    print(f" -> Skipping unsupported file format: {rel_path}")
+                    
+    return documents
+
+def get_document_chunks(file_path: str, api_key: str = None, original_file_name: str = None):
+    """
+    Extracts text chunks from either a standalone PDF or a ZIP archive containing multiple documents.
+    """
+    name_to_check = original_file_name or file_path
+    if name_to_check.lower().endswith(".zip"):
+        print(f"\nProcessing ZIP archive: {name_to_check}...")
+        documents = extract_zip_archive(
+            file_path,
+            api_key=api_key,
+            original_zip_name=os.path.basename(name_to_check)
+        )
+    else:
+        display_name = os.path.basename(name_to_check)
+        documents = extract_advanced_pdf(file_path, api_key=api_key, display_source_name=display_name)
+        
+    if not documents:
+        raise ValueError("No readable text or supported documents found in the uploaded file/archive!")
+        
+    print(f"\nSplitting {len(documents)} document pages/files into chunks...")
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
     chunks = text_splitter.split_documents(documents)
     print(f"Created {len(chunks)} text chunks total.")
     return chunks
 
-def initialize_vector_db(chunks, api_key: str, persist_directory="./chroma_db"):
+def initialize_vector_db(chunks, api_key: str = None, persist_directory="./chroma_db"):
     """
-    Uses the active API key to generate embeddings and initialize Chroma.
+    Initializes Chroma vector DB using either Gemini Embeddings (if key provided)
+    or fast, free LocalMiniLMEmbeddings (default, zero keys required).
     """
     print("\n--- Step 3: Initializing Embeddings & Vector DB ---")
-    if not api_key:
-        raise ValueError("Google API key is missing! Please provide a key in the sidebar.")
+    embeddings = get_embedding_model(api_key)
+    is_local = isinstance(embeddings, LocalMiniLMEmbeddings)
     
-    # Use the active api_key dynamically
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-2", google_api_key=api_key)
-    print(f"Generating embeddings and saving to {persist_directory}...")
+    if is_local:
+        print(f"Using 100% local MiniLM embeddings (Zero API keys required). Saving to {persist_directory}...")
+    else:
+        print(f"Generating Gemini embeddings and saving to {persist_directory}...")
     
     # Index in batches
     batch_size = 50
@@ -133,7 +248,7 @@ def initialize_vector_db(chunks, api_key: str, persist_directory="./chroma_db"):
         batch_chunks = chunks[i:i + batch_size]
         print(f" -> Indexing batch {i//batch_size + 1}...")
         
-        if i > 0:
+        if not is_local and i > 0:
             time.sleep(3.5)
             
         if vector_db is None:
@@ -148,16 +263,30 @@ def initialize_vector_db(chunks, api_key: str, persist_directory="./chroma_db"):
     print("Vector database successfully created and saved!")
     return vector_db
 
-def query_rag_system(query: str, vector_db, api_key: str):
+def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: str = None, model_name: str = "llama-3.3-70b-versatile"):
     """
-    Uses the active API key to run the Gemini LCEL retrieval chain.
+    Uses the active API key (Groq or Gemini) to run the LCEL retrieval chain.
     """
     print("\n--- Step 4: Stitching LCEL retrieval chain & generating answer ---")
-    if not api_key:
-        raise ValueError("Google API key is missing! Please provide a key in the sidebar.")
+    
+    # Select LLM: Prefer Groq if key is provided, fallback to Gemini
+    if groq_api_key and groq_api_key.strip():
+        print(f"Generating answer with Groq ({model_name})...")
+        llm = ChatGroq(
+            model=model_name,
+            groq_api_key=groq_api_key.strip(),
+            temperature=0.0
+        )
+    elif api_key and api_key.strip():
+        print("Generating answer with Gemini (gemini-2.5-flash)...")
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=api_key.strip(),
+            temperature=0.0
+        )
+    else:
+        raise ValueError("Neither Groq API key nor Google API key was provided for text generation!")
 
-    # Initialize Gemini with the active API key
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0.0)
     retriever = vector_db.as_retriever(search_kwargs={"k": 3})
     
     system_prompt = (
@@ -178,7 +307,7 @@ def query_rag_system(query: str, vector_db, api_key: str):
     
     generation_chain = prompt | llm | StrOutputParser()
     
-    print("Generating answer with Gemini...")
+    print("Generating answer...")
     answer = generation_chain.invoke({
         "context": context_text,
         "question": query

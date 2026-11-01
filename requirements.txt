@@ -9,3 +9,5 @@ python-dotenv
 pdfplumber
 pymupdf
 google-generativeai
+groq
+langchain-groq

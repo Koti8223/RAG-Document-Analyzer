@@ -4,8 +4,7 @@ import tempfile
 from dotenv import load_dotenv
 
 # Import our backend functions
-from rag_pipeline import get_document_chunks, initialize_vector_db, query_rag_system
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from rag_pipeline import get_document_chunks, initialize_vector_db, query_rag_system, get_embedding_model
 from langchain_chroma import Chroma
 
 # Load environment variables
@@ -36,14 +35,14 @@ def display_source_tabs(context):
         return
         
     st.markdown("### 🔍 Source Citations")
-    tabs = st.tabs([f"📄 Source {i+1} (Page {doc.metadata.get('page', 'N/A')})" for i, doc in enumerate(context)])
+    tabs = st.tabs([f"📄 Source {i+1} ({os.path.basename(doc.metadata.get('source', 'Unknown'))})" for i, doc in enumerate(context)])
     
     for idx, tab in enumerate(tabs):
         doc = context[idx]
         with tab:
-            filename = os.path.basename(doc.metadata.get("source", "Unknown File"))
+            source_name = doc.metadata.get("source", "Unknown File")
             page_num = doc.metadata.get("page", "N/A")
-            st.caption(f"📂 **File:** `{filename}` | 📄 **Page:** `{page_num}`")
+            st.caption(f"📂 **Source:** `{source_name}` | 📄 **Page:** `{page_num}`")
             formatted_text = "\n> ".join(doc.page_content.split("\n"))
             st.markdown(f"> {formatted_text}")
 
@@ -51,37 +50,63 @@ def display_source_tabs(context):
 with st.sidebar:
     st.title("⚙️ Document Settings")
     
-    # Check if a default system key is configured in your env/secrets
-    system_key = os.getenv("GOOGLE_API_KEY")
-    system_key_exists = system_key is not None and system_key.strip() != ""
+    # Check default system keys configured in env/secrets
+    system_groq_key = os.getenv("GROQ_API_KEY")
+    system_groq_key_exists = system_groq_key is not None and system_groq_key.strip() != ""
     
-    # Dynamically change label: Optional locally, Required for public users
-    key_label = "Gemini API Key (Optional)" if system_key_exists else "Gemini API Key (Required)"
-    placeholder_text = "Uses local system key by default..." if system_key_exists else "Required to run queries..."
+    # 1. Groq API Key (Primary LLM generation key)
+    groq_label = "⚡ Groq API Key (Optional - In .env)" if system_groq_key_exists else "⚡ Groq API Key (Required)"
+    groq_placeholder = "Uses GROQ_API_KEY from .env..." if system_groq_key_exists else "Enter Groq Key (gsk_...)"
+    user_groq_key = st.text_input(
+        groq_label,
+        type="password",
+        placeholder=groq_placeholder,
+        help="Get your key from console.groq.com. Powers ultra-fast answer generation."
+    )
+    active_groq_key = user_groq_key.strip() if user_groq_key and user_groq_key.strip() else (system_groq_key.strip() if system_groq_key else "")
     
-    # Security: Bring Your Own Key (BYOK) Input Box
-    user_key = st.text_input(
-        key_label, 
-        type="password", 
-        placeholder=placeholder_text,
-        help="Get a free key from Google AI Studio. Since this is a public demo, providing your own key is required." if not system_key_exists else "If left blank, it will use the default system key."
+    # Groq Model selection
+    groq_model_options = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it"
+    ]
+    selected_model = st.selectbox(
+        "🧠 LLM Model",
+        options=groq_model_options,
+        index=0,
+        help="Select the Groq model used to generate answers."
     )
     
-    # Determine which key to use (User key takes priority over default key)
-    active_key = user_key if user_key else os.getenv("GOOGLE_API_KEY")
+    if active_groq_key:
+        st.caption("⚡ Groq LPU active for high-speed generation.")
+    else:
+        st.caption("ℹ️ Please enter your Groq API key above.")
+        
+    # Optional Gemini settings for advanced users
+    system_gemini_key = os.getenv("GOOGLE_API_KEY")
+    with st.expander("⚙️ Optional Settings (Gemini Fallback)", expanded=False):
+        user_gemini_key = st.text_input(
+            "Gemini API Key (Optional)",
+            type="password",
+            placeholder="Uses GOOGLE_API_KEY from .env if present...",
+            help="Optional. If omitted, DeepDoc automatically uses free local embeddings."
+        )
+    active_gemini_key = user_gemini_key.strip() if user_gemini_key and user_gemini_key.strip() else (system_gemini_key.strip() if system_gemini_key else "")
     
     st.write("---")
     
     uploaded_file = st.file_uploader(
-        "Upload a Research Paper (PDF)", 
-        type=["pdf"], 
-        help="Upload any PDF to parse text, tables, and images."
+        "Upload a Document or Archive (PDF, ZIP)", 
+        type=["pdf", "zip"], 
+        help="Upload any PDF or ZIP archive containing PDFs, markdown, text, or code files."
     )
     
     # CASE A: A file is actively uploaded
     if uploaded_file is not None:
-        if not active_key:
-            st.error("🔑 Please enter a Gemini API Key or configure the system key in Secrets!")
+        if not active_groq_key and not active_gemini_key:
+            st.error("🔑 Please enter your Groq API Key in the sidebar to proceed!")
         else:
             if uploaded_file.name != st.session_state.current_file:
                 st.session_state.current_file = uploaded_file.name
@@ -89,12 +114,13 @@ with st.sidebar:
                 
                 db_dir = f"./chroma_db_{uploaded_file.name}"
                 
-                with st.status("Reading and indexing document...", expanded=True) as status:
+                with st.status(f"Indexing {uploaded_file.name}...", expanded=True) as status:
                     try:
+                        embeddings = get_embedding_model(active_gemini_key)
+                        
                         # Performance: Check if the vector database already exists on disk (Caching)
                         if os.path.exists(db_dir):
                             status.write("⚡ Found existing database on disk. Loading instantly...")
-                            embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-2", google_api_key=active_key)
                             st.session_state.vector_db = Chroma(
                                 persist_directory=db_dir,
                                 embedding_function=embeddings
@@ -102,24 +128,34 @@ with st.sidebar:
                             status.update(label="Database loaded from cache!", state="complete", expanded=False)
                             st.success("Loaded from disk instantly! Ready for Q&A.")
                         else:
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                            file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
                                 tmp_file.write(uploaded_file.getvalue())
                                 tmp_file_path = tmp_file.name
                             
-                            status.write("Parsing text and tables locally...")
-                            chunks = get_document_chunks(tmp_file_path, api_key=active_key)
+                            status.write(f"Extracting contents from {uploaded_file.name}...")
+                            chunks = get_document_chunks(
+                                tmp_file_path, 
+                                api_key=active_gemini_key,
+                                original_file_name=uploaded_file.name
+                            )
                             
-                            status.write("Generating embeddings and building vector database...")
-                            st.session_state.vector_db = initialize_vector_db(chunks, api_key=active_key, persist_directory=db_dir)
+                            status.write(f"Building vector database for {len(chunks)} text chunks...")
+                            st.session_state.vector_db = initialize_vector_db(
+                                chunks, 
+                                api_key=active_gemini_key, 
+                                persist_directory=db_dir
+                            )
                             
                             os.remove(tmp_file_path)
-                            status.update(label="Document indexed successfully!", state="complete", expanded=False)
-                            st.success("Ready for Q&A!")
+                            status.update(label="Document(s) indexed successfully!", state="complete", expanded=False)
+                            st.success(f"Ready for Q&A! ({len(chunks)} chunks indexed)")
                     except Exception as e:
                         status.update(label="Indexing failed!", state="error")
                         st.error(f"Error: {e}")
                         st.session_state.vector_db = None
                         st.session_state.current_file = None
+
                     
     # CASE B: No file is uploaded
     else:
@@ -159,14 +195,20 @@ if query := st.chat_input("Ask a question about the document..."):
     if not st.session_state.vector_db:
         with st.chat_message("assistant"):
             st.warning("Please upload a PDF document in the sidebar first!")
-    elif not active_key:
+    elif not active_groq_key and not active_gemini_key:
         with st.chat_message("assistant"):
-            st.error("🔑 Please enter a Gemini API Key to run queries!")
+            st.error("🔑 Please enter your Groq API Key in the sidebar to run queries!")
     else:
         with st.chat_message("assistant"):
             with st.spinner("Analyzing document..."):
                 try:
-                    response = query_rag_system(query, st.session_state.vector_db, api_key=active_key)
+                    response = query_rag_system(
+                        query,
+                        st.session_state.vector_db,
+                        api_key=active_gemini_key,
+                        groq_api_key=active_groq_key,
+                        model_name=selected_model
+                    )
                     answer = response["answer"]
                     context = response["context"]
                     
@@ -180,8 +222,8 @@ if query := st.chat_input("Ask a question about the document..."):
                         "context": context
                     })
                 except Exception as e:
-                    if "429" in str(e) or "quota" in str(e).lower():
-                        warning_msg = "⚠️ Gemini API is temporarily rate-limited. Please wait 30 seconds and try again!"
+                    if "429" in str(e) or "quota" in str(e).lower() or "rate_limit" in str(e).lower():
+                        warning_msg = "⚠️ API rate limit reached. Please wait 30 seconds and try again!"
                         st.warning(warning_msg)
                         st.session_state.chat_history.append({
                             "role": "assistant",
