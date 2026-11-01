@@ -94,19 +94,8 @@ with st.sidebar:
     cleaned_user_groq = user_groq_key.strip().strip("'").strip('"') if user_groq_key else ""
     active_groq_key = cleaned_user_groq if cleaned_user_groq else system_groq_key
     
-    # Groq Model selection
-    groq_model_options = [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it"
-    ]
-    selected_model = st.selectbox(
-        "🧠 LLM Model",
-        options=groq_model_options,
-        index=0,
-        help="Select the Groq model used to generate answers."
-    )
+    # Clean, direct execution with Groq
+    selected_model = "llama-3.1-8b-instant"
     
     if active_groq_key:
         if not active_groq_key.startswith("gsk_"):
@@ -116,17 +105,29 @@ with st.sidebar:
     else:
         st.caption("ℹ️ Please enter your Groq API key (starts with `gsk_`).")
         
-    # Optional Gemini settings for advanced users
+    # Optional Advanced Settings (Hidden by default for simplicity)
     system_gemini_key = get_config_secret("GOOGLE_API_KEY")
-    with st.expander("⚙️ Optional Settings (Gemini Fallback)", expanded=False):
+    with st.expander("⚙️ Advanced Settings (Optional)", expanded=False):
+        groq_model_options = [
+            "llama-3.1-8b-instant",
+            "llama3-8b-8192",
+            "llama-3.3-70b-versatile",
+            "mixtral-8x7b-32768"
+        ]
+        selected_model = st.selectbox(
+            "Model Selection",
+            options=groq_model_options,
+            index=0,
+            help="Default is llama-3.1-8b-instant (fastest & universal)."
+        )
         user_gemini_key = st.text_input(
-            "Gemini API Key (Optional)",
+            "Gemini API Key (Optional Fallback)",
             type="password",
             placeholder="Uses GOOGLE_API_KEY from env/secrets if present...",
-            help="Optional. If omitted, DeepDoc automatically uses free local embeddings."
+            help="Optional fallback. If omitted, DeepDoc automatically uses free local embeddings."
         )
-    cleaned_user_gemini = user_gemini_key.strip().strip("'").strip('"') if user_gemini_key else ""
-    active_gemini_key = cleaned_user_gemini if cleaned_user_gemini else system_gemini_key
+        cleaned_user_gemini = user_gemini_key.strip().strip("'").strip('"') if user_gemini_key else ""
+        active_gemini_key = cleaned_user_gemini if cleaned_user_gemini else system_gemini_key
     
     st.write("---")
     

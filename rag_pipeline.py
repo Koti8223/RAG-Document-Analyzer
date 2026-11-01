@@ -358,33 +358,18 @@ def initialize_vector_db(chunks, api_key: str = None, persist_directory="./chrom
     print("Vector database successfully created and saved!")
     return vector_db
 
-def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: str = None, model_name: str = "llama-3.3-70b-versatile"):
+def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: str = None, model_name: str = "llama-3.1-8b-instant"):
     """
     Uses the active API key (Groq or Gemini) to run the LCEL retrieval chain.
+    Automatically handles model fallbacks if a specific model ID is unavailable (e.g. 404).
     """
     print("\n--- Step 4: Stitching LCEL retrieval chain & generating answer ---")
     
-    # Clean keys of any accidental quotes or whitespace
     clean_groq_key = groq_api_key.strip().strip("'").strip('"') if groq_api_key else ""
     clean_gemini_key = api_key.strip().strip("'").strip('"') if api_key else ""
 
-    # Select LLM: Prefer Groq if key is provided, fallback to Gemini
-    if clean_groq_key:
-        print(f"Generating answer with Groq ({model_name})...")
-        llm = ChatGroq(
-            model=model_name,
-            groq_api_key=clean_groq_key,
-            temperature=0.0
-        )
-    elif clean_gemini_key:
-        print("Generating answer with Gemini (gemini-2.5-flash)...")
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            google_api_key=clean_gemini_key,
-            temperature=0.0
-        )
-    else:
-        raise ValueError("Neither Groq API key nor Google API key was provided for text generation!")
+    if not clean_groq_key and not clean_gemini_key:
+        raise ValueError("No API key provided. Please enter your Groq API key in the sidebar.")
 
     retriever = vector_db.as_retriever(search_kwargs={"k": 3})
     
@@ -404,14 +389,66 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
     retrieved_docs = retriever.invoke(query)
     context_text = "\n\n".join(doc.page_content for doc in retrieved_docs)
     
-    generation_chain = prompt | llm | StrOutputParser()
+    answer = None
+    last_error = None
     
-    print("Generating answer...")
-    answer = generation_chain.invoke({
-        "context": context_text,
-        "question": query
-    })
-    
+    # 1. Try Groq with auto-fallback across production models
+    if clean_groq_key:
+        candidate_models = [model_name, "llama-3.1-8b-instant", "llama3-8b-8192", "mixtral-8x7b-32768"]
+        # Remove duplicates while keeping order
+        ordered_models = []
+        for m in candidate_models:
+            if m and m not in ordered_models:
+                ordered_models.append(m)
+                
+        for target_model in ordered_models:
+            try:
+                print(f"Generating answer with Groq ({target_model})...")
+                llm = ChatGroq(
+                    model=target_model,
+                    groq_api_key=clean_groq_key,
+                    temperature=0.0
+                )
+                generation_chain = prompt | llm | StrOutputParser()
+                answer = generation_chain.invoke({
+                    "context": context_text,
+                    "question": query
+                })
+                if answer:
+                    break
+            except Exception as e:
+                err_str = str(e)
+                last_error = e
+                # If 404 (model not found / no access), try next candidate model
+                if "404" in err_str or "model_not_found" in err_str.lower() or "does not exist" in err_str.lower():
+                    print(f"Notice: Model {target_model} not accessible, attempting fallback...")
+                    continue
+                else:
+                    # Non-404 error (e.g. 401 invalid key, rate limit)
+                    raise e
+
+    # 2. Try Gemini fallback if Groq failed or wasn't provided
+    if not answer and clean_gemini_key:
+        try:
+            print("Generating answer with Gemini (gemini-2.5-flash)...")
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.5-flash",
+                google_api_key=clean_gemini_key,
+                temperature=0.0
+            )
+            generation_chain = prompt | llm | StrOutputParser()
+            answer = generation_chain.invoke({
+                "context": context_text,
+                "question": query
+            })
+        except Exception as e:
+            last_error = e
+
+    if not answer:
+        if last_error:
+            raise last_error
+        raise ValueError("Could not generate answer. Please check your API key.")
+
     return {
         "answer": answer,
         "context": retrieved_docs
