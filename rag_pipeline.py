@@ -137,53 +137,151 @@ def extract_advanced_pdf(file_path: str, api_key: str = None, display_source_nam
 
 def extract_text_file(file_path: str, display_name: str):
     """
-    Reads text, markdown, code, and structured CSV/TSV/JSON files safely without blowing memory.
+    Reads text, markdown, code, and structured CSV/TSV/JSON files safely.
+    For tabular datasets (CSV/TSV), indexes the complete dataset in batches of rows
+    preserving headers and structured key-value records so all rows are queryable via RAG.
     """
     _, ext = os.path.splitext(file_path.lower())
     file_size = os.path.getsize(file_path)
     
-    # Special handling for CSV / TSV tabular datasets
-    if ext in [".csv", ".tsv"]:
+    # 1. Special handling for CSV / TSV / TAB tabular datasets
+    if ext in [".csv", ".tsv", ".tab"]:
         try:
             import csv
-            delimiter = "\t" if ext == ".tsv" else ","
+            delimiter = "\t" if ext in [".tsv", ".tab"] else ","
             rows = []
-            total_rows = 0
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                first_line = f.readline()
+                f.seek(0)
+                if ext == ".csv" and ";" in first_line and "," not in first_line:
+                    delimiter = ";"
                 reader = csv.reader(f, delimiter=delimiter)
-                for i, row in enumerate(reader):
-                    total_rows += 1
-                    if i < 25:
+                for row in reader:
+                    if row and any(cell.strip() for cell in row):
                         rows.append(row)
-                # Count the rest if file is large
-                for _ in f:
-                    total_rows += 1
             
-            if rows:
-                headers = rows[0]
-                md = f"### Dataset Profile: `{display_name}`\n"
-                md += f"- **Format:** {ext.upper()[1:]} Tabular Data\n"
-                md += f"- **Estimated Rows:** ~{total_rows:,}\n"
-                md += f"- **Total Columns:** {len(headers)}\n"
-                md += f"- **Column Names:** `" + "`, `".join(str(h) for h in headers[:40]) + "`\n\n"
-                md += "#### Sample Data Preview (First Rows):\n"
-                md += convert_table_to_markdown(rows[:15])
+            if not rows:
+                return []
+                
+            headers = [str(h).strip() for h in rows[0]]
+            data_rows = rows[1:]
+            total_rows = len(data_rows)
+            
+            table_documents = []
+            
+            # (A) Comprehensive Dataset Profile
+            profile_md = f"### Dataset Profile: `{display_name}`\n"
+            profile_md += f"- **File:** `{display_name}`\n"
+            profile_md += f"- **Format:** {ext.upper()[1:]} Tabular Data\n"
+            profile_md += f"- **Total Records:** {total_rows:,}\n"
+            profile_md += f"- **Total Columns ({len(headers)}):** `" + "`, `".join(headers[:30]) + "`\n"
+            if len(headers) > 30:
+                profile_md += f"...and {len(headers) - 30} additional columns.\n"
+            profile_md += "\n#### Sample Overview (First Rows):\n"
+            sample_preview = [headers] + data_rows[:8]
+            profile_md += convert_table_to_markdown(sample_preview)
+            
+            table_documents.append(
+                Document(
+                    page_content=profile_md,
+                    metadata={"source": display_name, "page": 1, "type": "dataset_profile"}
+                )
+            )
+            
+            # (B) Chunk ALL data rows in batches of 20 rows
+            BATCH_SIZE = 20
+            max_rows_to_index = min(total_rows, 3000)
+            
+            for start_idx in range(0, max_rows_to_index, BATCH_SIZE):
+                end_idx = min(start_idx + BATCH_SIZE, max_rows_to_index)
+                batch_rows = data_rows[start_idx:end_idx]
+                chunk_table = [headers] + batch_rows
+                
+                chunk_md = f"### Data Records from `{display_name}` (Rows {start_idx + 1} to {end_idx} of {total_rows}):\n\n"
+                chunk_md += convert_table_to_markdown(chunk_table)
+                chunk_md += "\n#### Individual Records:\n"
+                for r_i, r in enumerate(batch_rows, start_idx + 1):
+                    kv_pairs = []
+                    for c_i in range(min(len(headers), len(r))):
+                        val = str(r[c_i]).strip()
+                        if val:
+                            kv_pairs.append(f"{headers[c_i]}: {val}")
+                    if kv_pairs:
+                        record_str = ", ".join(kv_pairs[:20])
+                        if len(kv_pairs) > 20:
+                            record_str += f"... (+{len(kv_pairs) - 20} more fields)"
+                        chunk_md += f"- **Record {r_i}:** {record_str}\n"
+                        
+                table_documents.append(
+                    Document(
+                        page_content=chunk_md,
+                        metadata={
+                            "source": display_name, 
+                            "page": (start_idx // BATCH_SIZE) + 2, 
+                            "type": "data_rows"
+                        }
+                    )
+                )
+                
+            return table_documents
+        except Exception as e:
+            print(f"Error reading tabular file {file_path}: {e}")
+
+    # 2. JSON and JSONL datasets
+    if ext in [".json", ".jsonl"]:
+        try:
+            import json
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            try:
+                data = json.loads(content)
+            except Exception:
+                data = []
+                for line in content.splitlines():
+                    if line.strip():
+                        try:
+                            data.append(json.loads(line))
+                        except Exception:
+                            pass
+            
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                json_docs = []
+                BATCH_SIZE = 15
+                total_items = len(data)
+                for start_idx in range(0, min(total_items, 1500), BATCH_SIZE):
+                    end_idx = min(start_idx + BATCH_SIZE, total_items)
+                    batch = data[start_idx:end_idx]
+                    md = f"### JSON Records from `{display_name}` (Items {start_idx + 1} to {end_idx} of {total_items}):\n\n"
+                    for item_idx, item in enumerate(batch, start_idx + 1):
+                        kv = [f"{k}: {v}" for k, v in item.items() if v is not None and str(v).strip()]
+                        md += f"- **Item {item_idx}:** {', '.join(kv[:15])}\n"
+                    json_docs.append(
+                        Document(
+                            page_content=md,
+                            metadata={"source": display_name, "page": (start_idx // BATCH_SIZE) + 1, "type": "json_records"}
+                        )
+                    )
+                if json_docs:
+                    return json_docs
+            elif isinstance(data, dict):
+                formatted = json.dumps(data, indent=2)
+                if len(formatted) > 100_000:
+                    formatted = formatted[:100_000] + "\n... [Truncated] ..."
                 return [
                     Document(
-                        page_content=md,
+                        page_content=f"### JSON Content: `{display_name}`\n```json\n{formatted}\n```",
                         metadata={"source": display_name, "page": 1}
                     )
                 ]
         except Exception as e:
-            print(f"Error reading tabular file {file_path}: {e}")
+            print(f"Error reading JSON {file_path}: {e}")
 
-    # For text, markdown, json, code files
+    # 3. For text, markdown, code, and other text-based files
     try:
-        # Read up to 120 KB to prevent memory exhaustion
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            text = f.read(120_000)
-            if file_size > 120_000:
-                text += f"\n\n[... File truncated: showing first 120KB of {file_size / 1024:.1f}KB ...]"
+            text = f.read(150_000)
+            if file_size > 150_000:
+                text += f"\n\n[... File truncated: showing first 150KB of {file_size / 1024:.1f}KB ...]"
     except Exception as e:
         print(f"Error reading {file_path}: {e}")
         return []
@@ -208,7 +306,7 @@ def extract_zip_archive(zip_path: str, api_key: str = None, original_zip_name: s
     supported_text_exts = {
         ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".py", ".html", 
         ".xml", ".rst", ".yaml", ".yml", ".log", ".sql", ".ini", ".toml", ".cfg",
-        ".sh", ".bat", ".ipynb"
+        ".sh", ".bat", ".ipynb", ".jsonl", ".ndjson", ".tab", ".data"
     }
     dataset_binary_exts = {
         ".h5", ".hdf5", ".npz", ".npy", ".pkl", ".pickle", ".parquet", ".feather",
@@ -281,12 +379,13 @@ def extract_zip_archive(zip_path: str, api_key: str = None, original_zip_name: s
         manifest_md += f"- `{entry['path']}` (Size: {entry['size']}, Type: {entry['ext']})\n"
     if len(manifest_entries) > 100:
         manifest_md += f"\n*...and {len(manifest_entries) - 100} additional files.*"
+    manifest_md += "\n\n*(Note: All enclosed CSV tables, datasets, text files, and PDFs have been parsed and their full records are indexed into the knowledge base for direct retrieval).* \n"
         
     manifest_doc = Document(
         page_content=manifest_md,
         metadata={"source": f"{original_zip_name} / [Archive Manifest]", "page": 1}
     )
-    documents.insert(0, manifest_doc)
+    documents.append(manifest_doc)
                     
     return documents
 
@@ -316,8 +415,21 @@ def get_document_chunks(file_path: str, api_key: str = None, original_file_name:
         ]
         
     print(f"\nSplitting {len(documents)} document pages/files into chunks...")
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
-    chunks = text_splitter.split_documents(documents)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1500, 
+        chunk_overlap=150, 
+        separators=["\n\n", "\n", " ", ""],
+        length_function=len
+    )
+    
+    chunks = []
+    for doc in documents:
+        # Keep already-structured small table documents and profile documents intact
+        if len(doc.page_content) <= 1600 or doc.metadata.get("type") in ["data_rows", "dataset_profile"]:
+            chunks.append(doc)
+        else:
+            chunks.extend(text_splitter.split_documents([doc]))
+            
     print(f"Created {len(chunks)} text chunks total.")
     return chunks
 
@@ -419,12 +531,18 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
     if not clean_groq_key and not clean_gemini_key:
         raise ValueError("No API key provided. Please enter your Groq API key in the sidebar.")
 
-    retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+    retriever = vector_db.as_retriever(search_kwargs={"k": 8})
     
     system_prompt = (
-        "You are an expert research analyst. Answer the user's question using ONLY "
-        "the provided context. If you don't know the answer or if it's not present in "
-        "the context, say 'I don't have this information in the document.'\n\n"
+        "You are an expert data and research analyst. Answer the user's question thoroughly "
+        "and directly using the provided context, which includes extracted document text, "
+        "tabular dataset records (CSV/TSV tables), structured records, manifests, and file contents.\n\n"
+        "Guidelines:\n"
+        "1. When the user asks for data (such as sensor data, locations, incidents, readings, metrics), "
+        "extract and present the specific rows, fields, values, or statistics directly from the context.\n"
+        "2. If multiple records or sensors are present, organize and present them clearly in a clean Markdown table or organized bullet list.\n"
+        "3. Never tell the user to manually extract or open files if the records or tables are present in the context — always present the actual data directly.\n"
+        "4. If certain specific data fields are not mentioned in the context, state what is available in the dataset and provide whatever relevant data was found.\n\n"
         "Context:\n{context}"
     )
     

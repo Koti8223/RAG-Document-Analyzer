@@ -143,13 +143,23 @@ with st.sidebar:
         if not active_groq_key and not active_gemini_key:
             st.error("🔑 Please enter your Groq API Key in the sidebar to proceed!")
         else:
+            safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', uploaded_file.name)
+            db_dir = f"./chroma_db_v3_{safe_name}"
+            
+            # Allow user to force re-index and wipe cache
+            if st.session_state.vector_db is not None and uploaded_file.name == st.session_state.current_file:
+                if st.button("🔄 Force Re-index Archive", help="Clears cached index and re-extracts all data rows & files from scratch"):
+                    import shutil
+                    if os.path.exists(db_dir):
+                        shutil.rmtree(db_dir, ignore_errors=True)
+                    st.session_state.vector_db = None
+                    st.session_state.current_file = None
+                    st.rerun()
+
             if uploaded_file.name != st.session_state.current_file:
                 st.session_state.current_file = uploaded_file.name
                 st.session_state.chat_history = []  # Clear history for new file
                 st.session_state.indexing_error = None
-                
-                safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', uploaded_file.name)
-                db_dir = f"./chroma_db_{safe_name}"
                 
                 with st.status(f"Indexing {uploaded_file.name}...", expanded=True) as status:
                     try:
