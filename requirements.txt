@@ -11,3 +11,4 @@ pymupdf
 google-generativeai
 groq
 langchain-groq
+pysqlite3-binary; sys_platform == 'linux'

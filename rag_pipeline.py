@@ -137,11 +137,53 @@ def extract_advanced_pdf(file_path: str, api_key: str = None, display_source_nam
 
 def extract_text_file(file_path: str, display_name: str):
     """
-    Reads plain text, markdown, code, and structured data files.
+    Reads text, markdown, code, and structured CSV/TSV/JSON files safely without blowing memory.
     """
+    _, ext = os.path.splitext(file_path.lower())
+    file_size = os.path.getsize(file_path)
+    
+    # Special handling for CSV / TSV tabular datasets
+    if ext in [".csv", ".tsv"]:
+        try:
+            import csv
+            delimiter = "\t" if ext == ".tsv" else ","
+            rows = []
+            total_rows = 0
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                reader = csv.reader(f, delimiter=delimiter)
+                for i, row in enumerate(reader):
+                    total_rows += 1
+                    if i < 25:
+                        rows.append(row)
+                # Count the rest if file is large
+                for _ in f:
+                    total_rows += 1
+            
+            if rows:
+                headers = rows[0]
+                md = f"### Dataset Profile: `{display_name}`\n"
+                md += f"- **Format:** {ext.upper()[1:]} Tabular Data\n"
+                md += f"- **Estimated Rows:** ~{total_rows:,}\n"
+                md += f"- **Total Columns:** {len(headers)}\n"
+                md += f"- **Column Names:** `" + "`, `".join(str(h) for h in headers[:40]) + "`\n\n"
+                md += "#### Sample Data Preview (First Rows):\n"
+                md += convert_table_to_markdown(rows[:15])
+                return [
+                    Document(
+                        page_content=md,
+                        metadata={"source": display_name, "page": 1}
+                    )
+                ]
+        except Exception as e:
+            print(f"Error reading tabular file {file_path}: {e}")
+
+    # For text, markdown, json, code files
     try:
+        # Read up to 120 KB to prevent memory exhaustion
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            text = f.read()
+            text = f.read(120_000)
+            if file_size > 120_000:
+                text += f"\n\n[... File truncated: showing first 120KB of {file_size / 1024:.1f}KB ...]"
     except Exception as e:
         print(f"Error reading {file_path}: {e}")
         return []
@@ -158,14 +200,23 @@ def extract_text_file(file_path: str, display_name: str):
 
 def extract_zip_archive(zip_path: str, api_key: str = None, original_zip_name: str = "archive.zip"):
     """
-    Unpacks a ZIP archive and extracts text from all enclosed PDFs, Markdown,
-    text, CSV, JSON, and code files.
+    Unpacks a ZIP archive, inspects all files (including datasets like .h5, .npz, .pkl, .csv),
+    extracts readable content from PDFs/text/code, and generates a structured
+    Manifest Document so no ZIP archive ever returns empty.
     """
     documents = []
     supported_text_exts = {
-        ".txt", ".md", ".markdown", ".csv", ".json", ".py", ".html", 
-        ".xml", ".rst", ".yaml", ".yml", ".log", ".sql"
+        ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".py", ".html", 
+        ".xml", ".rst", ".yaml", ".yml", ".log", ".sql", ".ini", ".toml", ".cfg",
+        ".sh", ".bat", ".ipynb"
     }
+    dataset_binary_exts = {
+        ".h5", ".hdf5", ".npz", ".npy", ".pkl", ".pickle", ".parquet", ".feather",
+        ".mat", ".pt", ".pth", ".bin", ".dat"
+    }
+    
+    manifest_entries = []
+    total_uncompressed_bytes = 0
     
     with tempfile.TemporaryDirectory() as extract_dir:
         print(f"Unpacking ZIP: {original_zip_name}...")
@@ -176,7 +227,7 @@ def extract_zip_archive(zip_path: str, api_key: str = None, original_zip_name: s
             raise ValueError(f"Failed to extract ZIP archive: {e}")
             
         for root, dirs, files in os.walk(extract_dir):
-            # Ignore OS metadata and hidden directories
+            # Ignore hidden directories & cache
             dirs[:] = [d for d in dirs if not d.startswith("__") and not d.startswith(".")]
             
             for file_name in files:
@@ -186,18 +237,56 @@ def extract_zip_archive(zip_path: str, api_key: str = None, original_zip_name: s
                 full_path = os.path.join(root, file_name)
                 rel_path = os.path.relpath(full_path, extract_dir).replace("\\", "/")
                 display_name = f"{original_zip_name} / {rel_path}"
+                file_size = os.path.getsize(full_path)
+                total_uncompressed_bytes += file_size
                 _, ext = os.path.splitext(file_name.lower())
+                
+                size_str = f"{file_size / (1024*1024):.2f} MB" if file_size >= 1024*1024 else f"{file_size / 1024:.1f} KB"
+                manifest_entries.append({"path": rel_path, "size": size_str, "ext": ext or "unknown"})
                 
                 if ext == ".pdf":
                     print(f" -> Found PDF in ZIP: {rel_path}")
                     pdf_docs = extract_advanced_pdf(full_path, api_key=api_key, display_source_name=display_name)
                     documents.extend(pdf_docs)
                 elif ext in supported_text_exts:
-                    print(f" -> Found text/code file in ZIP: {rel_path}")
+                    print(f" -> Found text/data file in ZIP: {rel_path}")
                     txt_docs = extract_text_file(full_path, display_name)
                     documents.extend(txt_docs)
+                elif ext in dataset_binary_exts:
+                    print(f" -> Found dataset file in ZIP: {rel_path} ({size_str})")
+                    doc_content = (
+                        f"### Dataset File: `{rel_path}`\n"
+                        f"- **Archive:** `{original_zip_name}`\n"
+                        f"- **Format:** `{ext}` binary scientific / ML dataset\n"
+                        f"- **Size:** {size_str}\n"
+                        f"- **Description:** Enclosed data file in the `{original_zip_name}` package."
+                    )
+                    documents.append(
+                        Document(
+                            page_content=doc_content,
+                            metadata={"source": display_name, "page": 1}
+                        )
+                    )
                 else:
-                    print(f" -> Skipping unsupported file format: {rel_path}")
+                    print(f" -> Enclosed file in ZIP: {rel_path} ({size_str})")
+                    
+    # Always build the comprehensive archive manifest document
+    total_mb = total_uncompressed_bytes / (1024 * 1024)
+    manifest_md = f"# Archive Overview & File Manifest: `{original_zip_name}`\n"
+    manifest_md += f"- **Archive Name:** `{original_zip_name}`\n"
+    manifest_md += f"- **Total Enclosed Files:** {len(manifest_entries)}\n"
+    manifest_md += f"- **Total Uncompressed Size:** {total_mb:.2f} MB\n\n"
+    manifest_md += "### Enclosed Files & Directory Structure:\n"
+    for entry in manifest_entries[:100]:
+        manifest_md += f"- `{entry['path']}` (Size: {entry['size']}, Type: {entry['ext']})\n"
+    if len(manifest_entries) > 100:
+        manifest_md += f"\n*...and {len(manifest_entries) - 100} additional files.*"
+        
+    manifest_doc = Document(
+        page_content=manifest_md,
+        metadata={"source": f"{original_zip_name} / [Archive Manifest]", "page": 1}
+    )
+    documents.insert(0, manifest_doc)
                     
     return documents
 
@@ -218,7 +307,13 @@ def get_document_chunks(file_path: str, api_key: str = None, original_file_name:
         documents = extract_advanced_pdf(file_path, api_key=api_key, display_source_name=display_name)
         
     if not documents:
-        raise ValueError("No readable text or supported documents found in the uploaded file/archive!")
+        # Fallback safeguard: Never allow empty document set
+        documents = [
+            Document(
+                page_content=f"Uploaded file: {os.path.basename(name_to_check)} (No parseable text detected).",
+                metadata={"source": os.path.basename(name_to_check), "page": 1}
+            )
+        ]
         
     print(f"\nSplitting {len(documents)} document pages/files into chunks...")
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)

@@ -1,4 +1,12 @@
+try:
+    __import__('pysqlite3')
+    import sys
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    pass
+
 import os
+import re
 import streamlit as st
 import tempfile
 from dotenv import load_dotenv
@@ -26,6 +34,9 @@ if "vector_db" not in st.session_state:
 
 if "current_file" not in st.session_state:
     st.session_state.current_file = None
+
+if "indexing_error" not in st.session_state:
+    st.session_state.indexing_error = None
 
 def display_source_tabs(context):
     """
@@ -111,8 +122,10 @@ with st.sidebar:
             if uploaded_file.name != st.session_state.current_file:
                 st.session_state.current_file = uploaded_file.name
                 st.session_state.chat_history = []  # Clear history for new file
+                st.session_state.indexing_error = None
                 
-                db_dir = f"./chroma_db_{uploaded_file.name}"
+                safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', uploaded_file.name)
+                db_dir = f"./chroma_db_{safe_name}"
                 
                 with st.status(f"Indexing {uploaded_file.name}...", expanded=True) as status:
                     try:
@@ -125,6 +138,7 @@ with st.sidebar:
                                 persist_directory=db_dir,
                                 embedding_function=embeddings
                             )
+                            st.session_state.indexing_error = None
                             status.update(label="Database loaded from cache!", state="complete", expanded=False)
                             st.success("Loaded from disk instantly! Ready for Q&A.")
                         else:
@@ -146,6 +160,7 @@ with st.sidebar:
                                 api_key=active_gemini_key, 
                                 persist_directory=db_dir
                             )
+                            st.session_state.indexing_error = None
                             
                             os.remove(tmp_file_path)
                             status.update(label="Document(s) indexed successfully!", state="complete", expanded=False)
@@ -154,7 +169,7 @@ with st.sidebar:
                         status.update(label="Indexing failed!", state="error")
                         st.error(f"Error: {e}")
                         st.session_state.vector_db = None
-                        st.session_state.current_file = None
+                        st.session_state.indexing_error = str(e)
 
                     
     # CASE B: No file is uploaded
@@ -162,6 +177,7 @@ with st.sidebar:
         if st.session_state.current_file is not None:
             st.session_state.current_file = None
             st.session_state.vector_db = None
+            st.session_state.indexing_error = None
             st.session_state.chat_history = []
             st.rerun()
 
@@ -194,7 +210,10 @@ if query := st.chat_input("Ask a question about the document..."):
     
     if not st.session_state.vector_db:
         with st.chat_message("assistant"):
-            st.warning("Please upload a PDF document in the sidebar first!")
+            if st.session_state.get("indexing_error"):
+                st.error(f"⚠️ Could not index **{st.session_state.current_file}**: {st.session_state.indexing_error}")
+            else:
+                st.warning("Please upload a document or archive (PDF or ZIP) in the sidebar first!")
     elif not active_groq_key and not active_gemini_key:
         with st.chat_message("assistant"):
             st.error("🔑 Please enter your Groq API Key in the sidebar to run queries!")
