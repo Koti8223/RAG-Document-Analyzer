@@ -12,7 +12,13 @@ import tempfile
 from dotenv import load_dotenv
 
 # Import our backend functions
-from rag_pipeline import get_document_chunks, initialize_vector_db, query_rag_system, get_embedding_model
+from rag_pipeline import (
+    get_document_chunks, 
+    initialize_vector_db, 
+    query_rag_system, 
+    get_embedding_model,
+    get_available_groq_models
+)
 from langchain_chroma import Chroma
 
 # Load environment variables
@@ -108,17 +114,12 @@ with st.sidebar:
     # Optional Advanced Settings (Hidden by default for simplicity)
     system_gemini_key = get_config_secret("GOOGLE_API_KEY")
     with st.expander("⚙️ Advanced Settings (Optional)", expanded=False):
-        groq_model_options = [
-            "llama-3.1-8b-instant",
-            "llama3-8b-8192",
-            "llama-3.3-70b-versatile",
-            "mixtral-8x7b-32768"
-        ]
+        groq_model_options = get_available_groq_models(active_groq_key)
         selected_model = st.selectbox(
             "Model Selection",
             options=groq_model_options,
             index=0,
-            help="Default is llama-3.1-8b-instant (fastest & universal)."
+            help="Default is llama-3.1-8b-instant (fastest, active & universal across all tiers)."
         )
         user_gemini_key = st.text_input(
             "Gemini API Key (Optional Fallback)",
@@ -276,6 +277,17 @@ if query := st.chat_input("Ask a question about the document..."):
                             "4. Submit your question again."
                         )
                         st.error(warning_msg)
+                        st.session_state.chat_history.append({
+                            "role": "assistant",
+                            "content": warning_msg
+                        })
+                    elif "model_decommissioned" in err_str.lower() or "decommissioned" in err_str.lower():
+                        warning_msg = (
+                            "⚠️ **Model Retired by Groq**\n\n"
+                            "This model was decommissioned by Groq. The system has automatically defaulted to "
+                            "`llama-3.1-8b-instant`. Please try submitting your question again!"
+                        )
+                        st.warning(warning_msg)
                         st.session_state.chat_history.append({
                             "role": "assistant",
                             "content": warning_msg

@@ -358,10 +358,58 @@ def initialize_vector_db(chunks, api_key: str = None, persist_directory="./chrom
     print("Vector database successfully created and saved!")
     return vector_db
 
+def get_available_groq_models(groq_api_key: str = None) -> list:
+    """
+    Dynamically queries Groq's API to fetch active, supported chat models.
+    Filters out decommissioned/deprecated models and specialized audio/guard models.
+    Falls back safely to stable production models on network failure or if no key.
+    """
+    clean_key = (groq_api_key or "").strip().strip("'").strip('"')
+    default_models = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]
+    if not clean_key:
+        return default_models
+
+    try:
+        import urllib.request
+        import json
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {clean_key}", "User-Agent": "DeepDoc-RAG/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            found_models = []
+            for m in data.get("data", []):
+                mid = m.get("id", "")
+                if not mid or not m.get("active", True):
+                    continue
+                low = mid.lower()
+                # Exclude non-text / non-chat models
+                if any(x in low for x in ["whisper", "guard", "embed", "orpheus", "vision", "audio", "tts"]):
+                    continue
+                # Exclude decommissioned models
+                if any(x in low for x in ["8192", "mixtral", "gemma-7b-it", "llama2"]):
+                    continue
+                found_models.append(mid)
+
+            if found_models:
+                ordered = []
+                for preferred in ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]:
+                    if preferred in found_models and preferred not in ordered:
+                        ordered.append(preferred)
+                for other in found_models:
+                    if other not in ordered:
+                        ordered.append(other)
+                return ordered
+    except Exception as e:
+        print(f"Notice: Groq dynamic model discovery skipped ({e}), using default models.")
+
+    return default_models
+
 def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: str = None, model_name: str = "llama-3.1-8b-instant"):
     """
     Uses the active API key (Groq or Gemini) to run the LCEL retrieval chain.
-    Automatically handles model fallbacks if a specific model ID is unavailable (e.g. 404).
+    Automatically handles model fallbacks if a specific model ID is decommissioned (400) or unavailable (404).
     """
     print("\n--- Step 4: Stitching LCEL retrieval chain & generating answer ---")
     
@@ -394,14 +442,24 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
     
     # 1. Try Groq with auto-fallback across production models
     if clean_groq_key:
-        candidate_models = [model_name, "llama-3.1-8b-instant", "llama3-8b-8192", "mixtral-8x7b-32768"]
-        # Remove duplicates while keeping order
-        ordered_models = []
-        for m in candidate_models:
-            if m and m not in ordered_models:
-                ordered_models.append(m)
+        DECOMMISSIONED = {
+            "llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768",
+            "gemma-7b-it", "llama2-70b-4096"
+        }
+        
+        # Build candidate models
+        candidate_models = []
+        if model_name and model_name not in DECOMMISSIONED:
+            candidate_models.append(model_name)
+        if "llama-3.1-8b-instant" not in candidate_models:
+            candidate_models.append("llama-3.1-8b-instant")
+            
+        # Add dynamically discovered models or standard fallbacks
+        for m in get_available_groq_models(clean_groq_key):
+            if m not in candidate_models and m not in DECOMMISSIONED:
+                candidate_models.append(m)
                 
-        for target_model in ordered_models:
+        for target_model in candidate_models:
             try:
                 print(f"Generating answer with Groq ({target_model})...")
                 llm = ChatGroq(
@@ -419,12 +477,19 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
             except Exception as e:
                 err_str = str(e)
                 last_error = e
-                # If 404 (model not found / no access), try next candidate model
-                if "404" in err_str or "model_not_found" in err_str.lower() or "does not exist" in err_str.lower():
-                    print(f"Notice: Model {target_model} not accessible, attempting fallback...")
+                # Check if the model is decommissioned (400), not found (404), deprecated, or inaccessible
+                is_model_unavailable = any(phrase in err_str.lower() for phrase in [
+                    "404", "model_not_found", "does not exist",
+                    "400", "model_decommissioned", "decommissioned", "no longer supported",
+                    "deprecated", "invalid model", "access"
+                ])
+                is_auth_error = "401" in err_str or "invalid_api_key" in err_str.lower()
+                
+                if is_model_unavailable and not is_auth_error:
+                    print(f"Notice: Model {target_model} is decommissioned or unavailable ({err_str}), falling back...")
                     continue
                 else:
-                    # Non-404 error (e.g. 401 invalid key, rate limit)
+                    # Non-model error (e.g. 401 invalid key, rate limit)
                     raise e
 
     # 2. Try Gemini fallback if Groq failed or wasn't provided
