@@ -364,19 +364,23 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
     """
     print("\n--- Step 4: Stitching LCEL retrieval chain & generating answer ---")
     
+    # Clean keys of any accidental quotes or whitespace
+    clean_groq_key = groq_api_key.strip().strip("'").strip('"') if groq_api_key else ""
+    clean_gemini_key = api_key.strip().strip("'").strip('"') if api_key else ""
+
     # Select LLM: Prefer Groq if key is provided, fallback to Gemini
-    if groq_api_key and groq_api_key.strip():
+    if clean_groq_key:
         print(f"Generating answer with Groq ({model_name})...")
         llm = ChatGroq(
             model=model_name,
-            groq_api_key=groq_api_key.strip(),
+            groq_api_key=clean_groq_key,
             temperature=0.0
         )
-    elif api_key and api_key.strip():
+    elif clean_gemini_key:
         print("Generating answer with Gemini (gemini-2.5-flash)...")
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
-            google_api_key=api_key.strip(),
+            google_api_key=clean_gemini_key,
             temperature=0.0
         )
     else:

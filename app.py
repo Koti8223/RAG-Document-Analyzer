@@ -57,24 +57,42 @@ def display_source_tabs(context):
             formatted_text = "\n> ".join(doc.page_content.split("\n"))
             st.markdown(f"> {formatted_text}")
 
+def get_config_secret(key_name: str, default: str = "") -> str:
+    """
+    Safely retrieves a secret from os.environ (.env) or Streamlit Secrets (Cloud).
+    Strips accidental quotes and trailing whitespace.
+    """
+    val = os.getenv(key_name, "")
+    if val and str(val).strip():
+        return str(val).strip().strip("'").strip('"')
+    try:
+        if hasattr(st, "secrets") and key_name in st.secrets:
+            secret_val = str(st.secrets[key_name]).strip().strip("'").strip('"')
+            if secret_val:
+                return secret_val
+    except Exception:
+        pass
+    return default
+
 # --- SIDEBAR (For uploading and settings) ---
 with st.sidebar:
     st.title("⚙️ Document Settings")
     
-    # Check default system keys configured in env/secrets
-    system_groq_key = os.getenv("GROQ_API_KEY")
-    system_groq_key_exists = system_groq_key is not None and system_groq_key.strip() != ""
+    # Check default system keys configured in env or Streamlit Secrets
+    system_groq_key = get_config_secret("GROQ_API_KEY")
+    system_groq_key_exists = bool(system_groq_key)
     
     # 1. Groq API Key (Primary LLM generation key)
-    groq_label = "⚡ Groq API Key (Optional - In .env)" if system_groq_key_exists else "⚡ Groq API Key (Required)"
-    groq_placeholder = "Uses GROQ_API_KEY from .env..." if system_groq_key_exists else "Enter Groq Key (gsk_...)"
+    groq_label = "⚡ Groq API Key (Optional - Found in Settings)" if system_groq_key_exists else "⚡ Groq API Key (Required)"
+    groq_placeholder = "Using preconfigured key from Secrets/env..." if system_groq_key_exists else "Enter Groq Key (gsk_...)"
     user_groq_key = st.text_input(
         groq_label,
         type="password",
         placeholder=groq_placeholder,
-        help="Get your key from console.groq.com. Powers ultra-fast answer generation."
+        help="Get your key from console.groq.com/keys. Powers ultra-fast answer generation."
     )
-    active_groq_key = user_groq_key.strip() if user_groq_key and user_groq_key.strip() else (system_groq_key.strip() if system_groq_key else "")
+    cleaned_user_groq = user_groq_key.strip().strip("'").strip('"') if user_groq_key else ""
+    active_groq_key = cleaned_user_groq if cleaned_user_groq else system_groq_key
     
     # Groq Model selection
     groq_model_options = [
@@ -91,20 +109,24 @@ with st.sidebar:
     )
     
     if active_groq_key:
-        st.caption("⚡ Groq LPU active for high-speed generation.")
+        if not active_groq_key.startswith("gsk_"):
+            st.warning("⚠️ Notice: Groq API keys usually begin with `gsk_`. Please make sure you copied the entire key from console.groq.com/keys.")
+        else:
+            st.caption("⚡ Groq LPU active for high-speed generation.")
     else:
-        st.caption("ℹ️ Please enter your Groq API key above.")
+        st.caption("ℹ️ Please enter your Groq API key (starts with `gsk_`).")
         
     # Optional Gemini settings for advanced users
-    system_gemini_key = os.getenv("GOOGLE_API_KEY")
+    system_gemini_key = get_config_secret("GOOGLE_API_KEY")
     with st.expander("⚙️ Optional Settings (Gemini Fallback)", expanded=False):
         user_gemini_key = st.text_input(
             "Gemini API Key (Optional)",
             type="password",
-            placeholder="Uses GOOGLE_API_KEY from .env if present...",
+            placeholder="Uses GOOGLE_API_KEY from env/secrets if present...",
             help="Optional. If omitted, DeepDoc automatically uses free local embeddings."
         )
-    active_gemini_key = user_gemini_key.strip() if user_gemini_key and user_gemini_key.strip() else (system_gemini_key.strip() if system_gemini_key else "")
+    cleaned_user_gemini = user_gemini_key.strip().strip("'").strip('"') if user_gemini_key else ""
+    active_gemini_key = cleaned_user_gemini if cleaned_user_gemini else system_gemini_key
     
     st.write("---")
     
@@ -241,7 +263,23 @@ if query := st.chat_input("Ask a question about the document..."):
                         "context": context
                     })
                 except Exception as e:
-                    if "429" in str(e) or "quota" in str(e).lower() or "rate_limit" in str(e).lower():
+                    err_str = str(e)
+                    if "401" in err_str or "invalid_api_key" in err_str.lower():
+                        warning_msg = (
+                            "🔑 **Invalid Groq API Key (401 Unauthorized)**\n\n"
+                            "Groq rejected the API key provided.\n\n"
+                            "**How to fix:**\n"
+                            "1. Go to [console.groq.com/keys](https://console.groq.com/keys)\n"
+                            "2. Create a new key and click **Copy**\n"
+                            "3. Paste it directly into the **⚡ Groq API Key** box in the left sidebar (ensure it starts with `gsk_...`)\n"
+                            "4. Submit your question again."
+                        )
+                        st.error(warning_msg)
+                        st.session_state.chat_history.append({
+                            "role": "assistant",
+                            "content": warning_msg
+                        })
+                    elif "429" in err_str or "quota" in err_str.lower() or "rate_limit" in err_str.lower():
                         warning_msg = "⚠️ API rate limit reached. Please wait 30 seconds and try again!"
                         st.warning(warning_msg)
                         st.session_state.chat_history.append({
