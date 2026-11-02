@@ -291,6 +291,17 @@ if query := st.chat_input("Ask a question about the document..."):
                             "role": "assistant",
                             "content": warning_msg
                         })
+                    elif "reduce the length of the messages" in err_str.lower() or "messages or completion" in err_str.lower():
+                        warning_msg = (
+                            "📄 **Query/Context Exceeded Token Limit**\n\n"
+                            "The question asked for an overview that exceeded the model's message length limit. "
+                            "The system has automatically shortened the context. Please try asking your question again!"
+                        )
+                        st.warning(warning_msg)
+                        st.session_state.chat_history.append({
+                            "role": "assistant",
+                            "content": warning_msg
+                        })
                     elif "model_decommissioned" in err_str.lower() or "decommissioned" in err_str.lower():
                         warning_msg = (
                             "⚠️ **Model Retired by Groq**\n\n"

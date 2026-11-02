@@ -375,10 +375,10 @@ def extract_zip_archive(zip_path: str, api_key: str = None, original_zip_name: s
     manifest_md += f"- **Total Enclosed Files:** {len(manifest_entries)}\n"
     manifest_md += f"- **Total Uncompressed Size:** {total_mb:.2f} MB\n\n"
     manifest_md += "### Enclosed Files & Directory Structure:\n"
-    for entry in manifest_entries[:100]:
-        manifest_md += f"- `{entry['path']}` (Size: {entry['size']}, Type: {entry['ext']})\n"
-    if len(manifest_entries) > 100:
-        manifest_md += f"\n*...and {len(manifest_entries) - 100} additional files.*"
+    for entry in manifest_entries[:25]:
+        manifest_md += f"- `{entry['path']}` ({entry['size']})\n"
+    if len(manifest_entries) > 25:
+        manifest_md += f"\n*...and {len(manifest_entries) - 25} more files enclosed.*"
     manifest_md += "\n\n*(Note: All enclosed CSV tables, datasets, text files, and PDFs have been parsed and their full records are indexed into the knowledge base for direct retrieval).* \n"
         
     manifest_doc = Document(
@@ -555,7 +555,7 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
     retrieved_docs = retriever.invoke(query)
     
     # Budget context to stay safely under Groq's 6,000 Tokens-Per-Minute limit (~4,200 chars ≈ 1,000 tokens)
-    MAX_CONTEXT_CHARS = 4200
+    MAX_CONTEXT_CHARS = 3200
     selected_docs = []
     current_chars = 0
     for doc in retrieved_docs:
@@ -603,7 +603,8 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
                     llm = ChatGroq(
                         model=target_model,
                         groq_api_key=clean_groq_key,
-                        temperature=0.0
+                        temperature=0.0,
+                        max_tokens=1500
                     )
                     generation_chain = prompt | llm | StrOutputParser()
                     answer = generation_chain.invoke({
@@ -630,6 +631,16 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
                         print(f"Notice: Model {target_model} is unavailable, trying next model...")
                         break
                         
+                    # Check for message length error (400)
+                    is_length_error = any(phrase in err_str.lower() for phrase in [
+                        "reduce the length of the messages", "messages or completion",
+                        "context_length_exceeded", "too long", "maximum context length"
+                    ])
+                    if is_length_error and attempt < 2:
+                        print(f"Notice: Message length exceeded for model {target_model}. Trimming context to 1,600 chars and retrying...")
+                        context_text = context_text[:1600]
+                        continue
+
                     # Check for rate limit (429 / TPM quota)
                     is_rate_limit = any(phrase in err_str.lower() for phrase in [
                         "429", "rate_limit", "tpm", "quota", "too many requests"
