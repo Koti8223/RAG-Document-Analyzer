@@ -521,7 +521,7 @@ def get_available_groq_models(groq_api_key: str = None) -> list:
 def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: str = None, model_name: str = "llama-3.1-8b-instant"):
     """
     Uses the active API key (Groq or Gemini) to run the LCEL retrieval chain.
-    Automatically handles model fallbacks if a specific model ID is decommissioned (400) or unavailable (404).
+    Automatically handles model fallbacks and 429 rate limit retries with exponential backoff.
     """
     print("\n--- Step 4: Stitching LCEL retrieval chain & generating answer ---")
     
@@ -531,7 +531,7 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
     if not clean_groq_key and not clean_gemini_key:
         raise ValueError("No API key provided. Please enter your Groq API key in the sidebar.")
 
-    retriever = vector_db.as_retriever(search_kwargs={"k": 8})
+    retriever = vector_db.as_retriever(search_kwargs={"k": 5})
     
     system_prompt = (
         "You are an expert data and research analyst. Answer the user's question thoroughly "
@@ -553,12 +553,30 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
     
     print("Searching vector database for matching chunks...")
     retrieved_docs = retriever.invoke(query)
-    context_text = "\n\n".join(doc.page_content for doc in retrieved_docs)
+    
+    # Budget context to stay safely under Groq's 6,000 Tokens-Per-Minute limit (~4,200 chars ≈ 1,000 tokens)
+    MAX_CONTEXT_CHARS = 4200
+    selected_docs = []
+    current_chars = 0
+    for doc in retrieved_docs:
+        doc_len = len(doc.page_content)
+        if current_chars + doc_len <= MAX_CONTEXT_CHARS:
+            selected_docs.append(doc)
+            current_chars += doc_len
+        elif current_chars < 2500:
+            remaining = MAX_CONTEXT_CHARS - current_chars
+            selected_docs.append(Document(
+                page_content=doc.page_content[:remaining] + "\n... [Context truncated for token rate budget] ...",
+                metadata=doc.metadata
+            ))
+            break
+            
+    context_text = "\n\n".join(doc.page_content for doc in (selected_docs or retrieved_docs[:3]))
     
     answer = None
     last_error = None
     
-    # 1. Try Groq with auto-fallback across production models
+    # 1. Try Groq with auto-fallback and automatic 429 rate limit retry
     if clean_groq_key:
         DECOMMISSIONED = {
             "llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768",
@@ -578,37 +596,60 @@ def query_rag_system(query: str, vector_db, api_key: str = None, groq_api_key: s
                 candidate_models.append(m)
                 
         for target_model in candidate_models:
-            try:
-                print(f"Generating answer with Groq ({target_model})...")
-                llm = ChatGroq(
-                    model=target_model,
-                    groq_api_key=clean_groq_key,
-                    temperature=0.0
-                )
-                generation_chain = prompt | llm | StrOutputParser()
-                answer = generation_chain.invoke({
-                    "context": context_text,
-                    "question": query
-                })
-                if answer:
-                    break
-            except Exception as e:
-                err_str = str(e)
-                last_error = e
-                # Check if the model is decommissioned (400), not found (404), deprecated, or inaccessible
-                is_model_unavailable = any(phrase in err_str.lower() for phrase in [
-                    "404", "model_not_found", "does not exist",
-                    "400", "model_decommissioned", "decommissioned", "no longer supported",
-                    "deprecated", "invalid model", "access"
-                ])
-                is_auth_error = "401" in err_str or "invalid_api_key" in err_str.lower()
-                
-                if is_model_unavailable and not is_auth_error:
-                    print(f"Notice: Model {target_model} is decommissioned or unavailable ({err_str}), falling back...")
-                    continue
-                else:
-                    # Non-model error (e.g. 401 invalid key, rate limit)
-                    raise e
+            # Automatic retry loop for rate limits (up to 2 retries)
+            for attempt in range(3):
+                try:
+                    print(f"Generating answer with Groq ({target_model}, attempt {attempt + 1})...")
+                    llm = ChatGroq(
+                        model=target_model,
+                        groq_api_key=clean_groq_key,
+                        temperature=0.0
+                    )
+                    generation_chain = prompt | llm | StrOutputParser()
+                    answer = generation_chain.invoke({
+                        "context": context_text,
+                        "question": query
+                    })
+                    if answer:
+                        break
+                except Exception as e:
+                    err_str = str(e)
+                    last_error = e
+                    
+                    # Stop immediately on 401 auth error
+                    if "401" in err_str or "invalid_api_key" in err_str.lower():
+                        raise e
+                        
+                    # Check if model is decommissioned or not found
+                    is_model_unavailable = any(phrase in err_str.lower() for phrase in [
+                        "404", "model_not_found", "does not exist",
+                        "400", "model_decommissioned", "decommissioned", "no longer supported",
+                        "deprecated", "invalid model", "access"
+                    ])
+                    if is_model_unavailable:
+                        print(f"Notice: Model {target_model} is unavailable, trying next model...")
+                        break
+                        
+                    # Check for rate limit (429 / TPM quota)
+                    is_rate_limit = any(phrase in err_str.lower() for phrase in [
+                        "429", "rate_limit", "tpm", "quota", "too many requests"
+                    ])
+                    if is_rate_limit and attempt < 2:
+                        import re
+                        match = re.search(r'(?:try again in|wait|in)\s+([\d\.]+)\s*s', err_str, re.IGNORECASE)
+                        wait_sec = float(match.group(1)) if match else (3.0 * (attempt + 1))
+                        sleep_sec = min(max(wait_sec + 0.5, 2.0), 10.0)
+                        print(f"Notice: Rate limit hit. Waiting {sleep_sec:.1f}s before automatic retry {attempt + 2}...")
+                        time.sleep(sleep_sec)
+                        # Progressively compress context on retry to reduce token consumption
+                        context_text = context_text[:2600]
+                        continue
+                    else:
+                        # Non-retryable error or out of retries for this model
+                        break
+                        
+            if answer:
+                break
 
     # 2. Try Gemini fallback if Groq failed or wasn't provided
     if not answer and clean_gemini_key:

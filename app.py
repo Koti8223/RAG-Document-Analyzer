@@ -303,7 +303,14 @@ if query := st.chat_input("Ask a question about the document..."):
                             "content": warning_msg
                         })
                     elif "429" in err_str or "quota" in err_str.lower() or "rate_limit" in err_str.lower():
-                        warning_msg = "⚠️ API rate limit reached. Please wait 30 seconds and try again!"
+                        warning_msg = (
+                            "⏳ **Groq Rate Limit (Tokens Per Minute)**\n\n"
+                            "Groq's free tier limits usage to 6,000 tokens per minute. "
+                            "The system automatically retried with backoff, but the 60-second quota window is still cooling down.\n\n"
+                            "**How to continue:**\n"
+                            "- Please wait **15–20 seconds** for the token allowance to refresh, then re-send your question.\n"
+                            "- *(Tip)* You can also add a Gemini API key in **Advanced Settings** as an automatic backup provider!"
+                        )
                         st.warning(warning_msg)
                         st.session_state.chat_history.append({
                             "role": "assistant",
